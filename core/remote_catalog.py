@@ -195,32 +195,23 @@ def fetch_remote_catalog(*, force: bool = False) -> dict:
         raise
 
 
-def remote_skills_merged_with_local() -> list[dict]:
-    """Local RECOMMENDED_SKILLS + remote skills (remote wins on same name)."""
-    from core.skill_catalog import RECOMMENDED_SKILLS
-
+def all_network_catalog_skills() -> list[dict]:
+    """合并 hot_skills + skills，去重，按 hot_rank 排序。无本地硬编码。"""
+    manifest = cached_remote_manifest()
     by_name: dict[str, dict] = {}
-    for s in RECOMMENDED_SKILLS:
-        by_name[s.get("name", "").lower()] = dict(s)
-
-    try:
-        remote = cached_remote_manifest()
-    except Exception:
-        remote = {"skills": []}
-
-    for rs in remote.get("skills") or []:
+    for rs in (manifest.get("hot_skills") or []) + (manifest.get("skills") or []):
         if not isinstance(rs, dict) or not rs.get("name"):
             continue
         key = str(rs["name"]).lower().replace(" ", "_")
         by_name[key] = _normalize_remote_skill(rs)
+    items = list(by_name.values())
+    items.sort(key=lambda s: (int(s.get("hot_rank", 9999)), s.get("display", "")))
+    return items
 
-    for rs in remote.get("hot_skills") or []:
-        if not isinstance(rs, dict) or not rs.get("name"):
-            continue
-        key = str(rs["name"]).lower().replace(" ", "_")
-        by_name[key] = _normalize_remote_skill(rs)
 
-    return list(by_name.values())
+def remote_skills_merged_with_local() -> list[dict]:
+    """兼容旧名：仅返回远程 Skill 列表。"""
+    return all_network_catalog_skills()
 
 
 def remote_experts_merged_with_local(local_experts: list[dict]) -> list[dict]:

@@ -188,25 +188,16 @@ class SkillDialog(QDialog):
         desc_label.setWordWrap(True)
         layout.addWidget(desc_label)
         already = is_skill_installed(skill, installed)
-        planned = is_planned_skill(skill)
-        if planned:
-            install_btn = QPushButton("规划中")
-            install_btn.setEnabled(False)
-        else:
-            install_btn = QPushButton("✓ 已安装" if already else "＋ 安装")
-            install_btn.setEnabled(not already)
+        install_btn = QPushButton("✓ 已安装" if already else "＋ 安装")
+        install_btn.setEnabled(not already)
         install_btn.setProperty("variant", "secondary")
         install_btn.setCursor(Qt.PointingHandCursor)
         install_btn.setFixedHeight(30)
-        if not planned:
-            install_btn.clicked.connect(lambda: self._install_market(skill, install_btn))
+        install_btn.clicked.connect(lambda: self._install_market(skill, install_btn))
         layout.addWidget(install_btn)
         return card
 
     def _install_market(self, skill: dict, btn: QPushButton) -> None:
-        if is_planned_skill(skill):
-            QMessageBox.information(self, "规划中", "该技能尚在规划中，暂不可安装。")
-            return
         btn.setEnabled(False)
         btn.setText("安装中…")
         try:

@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "updated_at": "2026-06-28",
   "hot_skills": [
     {
@@ -399,6 +399,39 @@
         "Fetch"
       ],
       "skill_md": "# Web\nFetch 抓取，禁止编造。"
+    },
+    {
+      "name": "file_organizer",
+      "display": "文件整理",
+      "skill_type": "tool",
+      "category": "效率",
+      "icon": "📂",
+      "hot_rank": 25,
+      "hot": true,
+      "tags": [
+        "文件",
+        "整理",
+        "exports"
+      ],
+      "recommended_mcp": [
+        "filesystem"
+      ],
+      "tools": [
+        {
+          "name": "list_exports_inventory",
+          "description": "列出 exports 目录并按扩展名分组",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "subpath": {
+                "type": "string"
+              }
+            },
+            "required": []
+          }
+        }
+      ],
+      "skill_md": "# 文件整理\n优先调用 list_exports_inventory。"
     }
   ],
   "experts": [
