@@ -27,14 +27,61 @@ def _cache_path() -> Path:
     return data_dir() / "remote_catalog_cache.json"
 
 
-def _fetch_json(url: str, timeout: float = 10.0) -> dict:
-    req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT, "Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw = resp.read().decode("utf-8", errors="replace")
-    data = json.loads(raw)
-    if not isinstance(data, dict):
-        raise ValueError("远程目录必须是 JSON 对象（含 skills / experts 等字段）")
-    return data
+def _jsdelivr_mirror(url: str) -> str | None:
+    prefix = "https://raw.githubusercontent.com/"
+    if not url.startswith(prefix):
+        return None
+    rest = url[len(prefix):].split("?", 1)[0]
+    parts = rest.split("/", 2)
+    if len(parts) < 3:
+        return None
+    user, repo, branch_and_path = parts[0], parts[1], parts[2]
+    branch, _, filepath = branch_and_path.partition("/")
+    if not branch or not filepath:
+        return None
+    return f"https://cdn.jsdelivr.net/gh/{user}/{repo}@{branch}/{filepath}"
+
+
+def _fetch_json(url: str, timeout: float = 10.0, *, bust_cache: bool = False) -> dict:
+    fetch_url = url
+    if bust_cache:
+        sep = "&" if "?" in url else "?"
+        fetch_url = f"{url}{sep}_={int(time.time())}"
+
+    candidates: list[str] = []
+    mirror = _jsdelivr_mirror(url)
+    if mirror:
+        candidates.append(f"{mirror}?_={int(time.time())}" if bust_cache else mirror)
+    candidates.append(fetch_url)
+
+    last_exc: Exception | None = None
+    best: dict | None = None
+    for candidate in candidates:
+        try:
+            req = urllib.request.Request(
+                candidate, headers={"User-Agent": _USER_AGENT, "Accept": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                raise ValueError("远程目录必须是 JSON 对象（含 skills / experts 等字段）")
+            if best is None:
+                best = data
+                continue
+            # 优先 version 更高、或 hot_skills 更多的清单
+            cur_hot = len(data.get("hot_skills") or [])
+            best_hot = len(best.get("hot_skills") or [])
+            cur_ver = int(data.get("version") or 0)
+            best_ver = int(best.get("version") or 0)
+            if cur_ver > best_ver or (cur_ver == best_ver and cur_hot > best_hot):
+                best = data
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
+            last_exc = exc
+            logger.debug("Catalog fetch failed for %s: %s", candidate, exc)
+    if best is not None:
+        return best
+    raise ValueError("无法拉取远程目录")
 
 
 def get_catalog_url() -> str:
@@ -120,7 +167,7 @@ def fetch_remote_catalog(*, force: bool = False) -> dict:
                 return cached
 
     try:
-        data = _fetch_json(url)
+        data = _fetch_json(url, bust_cache=force)
         payload = {
             "version": data.get("version", 1),
             "updated_at": data.get("updated_at", ""),
