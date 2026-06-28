@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtWidgets import (
@@ -42,25 +43,23 @@ HERO_SCENES = [
     ("电商运营", ["中国电商运营专家团"]),
 ]
 
-SKILL_CATEGORIES = [
-    "全部", "生活服务", "开发工具", "网站部署", "智育学习",
-    "投资理财", "内容创作", "信息资讯", "效率工具", "办公协同",
-]
-
-RECOMMENDED_SKILLS = [
-    {"name": "MarkItDown", "desc": "文档转换 Markdown/PDF/Word/PPT/图片OCR", "icon": "M", "category": "效率工具"},
-    {"name": "Web Access", "desc": "CDP 直连本地 Chrome，智能调度深度爬网工具", "icon": "🌐", "category": "开发工具"},
-    {"name": "Excel 文件处理", "desc": "Excel 文件创建与分析", "icon": "📊", "category": "办公协同"},
-    {"name": "Word 文档生成", "desc": "Word 文档创建与编辑", "icon": "📄", "category": "办公协同"},
-    {"name": "PPT 演示文稿", "desc": "PPT 创建与排版", "icon": "📽", "category": "办公协同"},
-    {"name": "技能创建指南", "desc": "创建和维护自定义技能的指南", "icon": "📖", "category": "开发工具"},
-    {"name": "QQ 音乐助手", "desc": "QQ 音乐官方智能助手，支持歌曲搜索", "icon": "🎵", "category": "生活服务"},
-    {"name": "腾讯新闻", "desc": "3分钟了解全球重要新闻动态", "icon": "📰", "category": "信息资讯"},
-    {"name": "股票综合分析器", "desc": "基于万矿蓝的全球股票三维分析", "icon": "📈", "category": "投资理财"},
-    {"name": "IMAP/SMTP 邮件", "desc": "通过 IMAP/SMTP 收发邮件", "icon": "✉", "category": "效率工具"},
-    {"name": "代码助手", "desc": "多语言代码生成、审查和调试", "icon": "💻", "category": "开发工具"},
-    {"name": "数据可视化", "desc": "从数据生成图表和可视化报告", "icon": "📉", "category": "数据分析"},
-]
+from core.skill_catalog import (
+    SKILL_CATEGORIES,
+    all_catalog_skills,
+    catalog_skills_for_category,
+    install_success_message,
+    is_planned_skill,
+    is_skill_installed,
+    skill_by_name,
+    skill_type_label,
+)
+from core.remote_catalog import (
+    fetch_remote_catalog,
+    get_catalog_url,
+    load_cached_catalog,
+    remote_experts_merged_with_local,
+)
+from agent_runtime.skill_installer import install_from_catalog
 
 CONNECTORS = [
     {"name": "通达信", "desc": "配置本地程序路径后可一键启动", "icon": "📈"},
@@ -144,10 +143,8 @@ class _ExpertCard(QFrame):
         btn = QPushButton("召唤专家")
         btn.setObjectName("SummonButton")
         btn.setCursor(Qt.PointingHandCursor)
-        btn.clicked.connect(lambda: self.summon.emit(
-            expert["name"],
-            f"你是{expert['name']}。{expert['desc']}",
-        ))
+        prompt = expert.get("prompt") or f"你是{expert['name']}。{expert['desc']}"
+        btn.clicked.connect(lambda: self.summon.emit(expert["name"], prompt))
         layout.addWidget(btn)
 
 
@@ -160,6 +157,7 @@ class _SkillCard(QFrame):
         super().__init__(parent)
         self.setObjectName("ActionCard")
         self._skill = skill
+        self._planned = is_planned_skill(skill)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(10)
@@ -174,24 +172,37 @@ class _SkillCard(QFrame):
 
         col = QVBoxLayout()
         col.setSpacing(2)
-        n = QLabel(skill["name"])
+        title = skill.get("display") or skill["name"]
+        n = QLabel(title)
         n.setObjectName("CardTitle")
         n.setStyleSheet("font-size:13px;")
         col.addWidget(n)
-        d = QLabel(skill["desc"])
+        badge_text = skill_type_label(skill)
+        if skill.get("remote"):
+            badge_text += " · 远程"
+        badge = QLabel(badge_text)
+        badge.setStyleSheet("font-size:10px; color:#94a3b8;")
+        col.addWidget(badge)
+        d = QLabel(skill.get("desc", ""))
         d.setObjectName("MutedLabel")
         d.setWordWrap(True)
         col.addWidget(d)
         layout.addLayout(col, 1)
 
-        self._btn = QPushButton("✓" if installed else "+")
-        self._btn.setObjectName("InputIconButton")
-        self._btn.setFixedSize(28, 28)
-        self._btn.setCursor(Qt.PointingHandCursor)
-        if installed:
+        if self._planned:
+            self._btn = QPushButton("规划")
+            self._btn.setEnabled(False)
+            self._btn.setFixedHeight(28)
+        elif installed:
+            self._btn = QPushButton("✓")
             self._btn.setEnabled(False)
             self._btn.setStyleSheet("color:#22c55e; font-weight:bold;")
+            self._btn.setFixedSize(28, 28)
         else:
+            self._btn = QPushButton("+")
+            self._btn.setObjectName("InputIconButton")
+            self._btn.setFixedSize(28, 28)
+            self._btn.setCursor(Qt.PointingHandCursor)
             self._btn.clicked.connect(self._on_click)
         layout.addWidget(self._btn)
 
@@ -577,6 +588,26 @@ class ExpertCenterPage(QFrame):
 
         self._load_custom_experts()
         self._load_installed_skills()
+        QTimer.singleShot(600, self._startup_catalog_refresh)
+
+    def _startup_catalog_refresh(self):
+        """启动后后台拉远程目录并刷新当前 Tab。"""
+        def work():
+            try:
+                fetch_remote_catalog(force=False)
+            except Exception:
+                pass
+            QTimer.singleShot(0, self._apply_catalog_to_ui)
+
+        threading.Thread(target=work, daemon=True, name="RemoteCatalogRefresh").start()
+
+    def _apply_catalog_to_ui(self):
+        self._update_catalog_status_label()
+        idx = self._stack.currentIndex()
+        if idx == 0:
+            self._filter_experts(self._expert_filter_cat)
+        elif idx == 1:
+            self._filter_skills(self._skill_filter_cat)
 
     # ── Tab switching ────────────────────────────────────────────────────
 
@@ -676,7 +707,7 @@ class ExpertCenterPage(QFrame):
             if item.widget():
                 item.widget().deleteLater()
 
-        all_experts = list(EXPERTS) + self._custom_experts
+        all_experts = remote_experts_merged_with_local(list(EXPERTS) + self._custom_experts)
 
         if category != "全部":
             all_experts = [e for e in all_experts if e.get("category") == category]
@@ -726,7 +757,17 @@ class ExpertCenterPage(QFrame):
             btn.setCursor(Qt.PointingHandCursor)
             sub_tabs.addWidget(btn)
         sub_tabs.addStretch()
+        self._skill_refresh_btn = QPushButton("从网络刷新")
+        self._skill_refresh_btn.setObjectName("FilterButton")
+        self._skill_refresh_btn.setCursor(Qt.PointingHandCursor)
+        self._skill_refresh_btn.clicked.connect(self._refresh_remote_catalog)
+        sub_tabs.addWidget(self._skill_refresh_btn)
         layout.addLayout(sub_tabs)
+
+        self._catalog_status = QLabel("")
+        self._catalog_status.setObjectName("MutedLabel")
+        layout.addWidget(self._catalog_status)
+        self._update_catalog_status_label()
 
         rec_title = QLabel("为你推荐")
         rec_title.setObjectName("SectionTitle")
@@ -740,11 +781,58 @@ class ExpertCenterPage(QFrame):
         self._skill_grid.setSpacing(10)
         layout.addWidget(self._skill_grid_widget)
 
-        self._populate_skill_grid(RECOMMENDED_SKILLS)
+        self._populate_skill_grid(all_catalog_skills())
 
         layout.addStretch()
         scroll.setWidget(content)
         return scroll
+
+    def _update_catalog_status_label(self):
+        url = get_catalog_url()
+        cached = load_cached_catalog() or {}
+        n_skills = len(cached.get("skills") or [])
+        n_experts = len(cached.get("experts") or [])
+        updated = cached.get("updated_at") or ""
+        err = cached.get("fetch_error") or ""
+
+        if cached.get("source_url") == url and (n_skills or n_experts):
+            extra = f" · 已缓存 {n_skills} 技能 / {n_experts} 专家"
+            if updated:
+                extra += f" · 更新于 {updated}"
+            self._catalog_status.setText(f"远程目录：{url}{extra}")
+        elif err:
+            self._catalog_status.setText(
+                f"远程目录：{url} · 拉取失败（{err}）· 可点「从网络刷新」重试"
+            )
+        else:
+            self._catalog_status.setText(
+                f"远程目录：{url} · 正在拉取或尚未缓存，请稍候或点「从网络刷新」"
+            )
+
+    def _refresh_remote_catalog(self):
+        self._skill_refresh_btn.setEnabled(False)
+        self._skill_refresh_btn.setText("刷新中…")
+
+        def work():
+            err = None
+            try:
+                fetch_remote_catalog(force=True)
+            except Exception as exc:
+                err = exc
+            QTimer.singleShot(0, lambda: self._finish_remote_refresh(err))
+
+        threading.Thread(target=work, daemon=True, name="RemoteCatalogForce").start()
+
+    def _finish_remote_refresh(self, err: Exception | None):
+        self._skill_refresh_btn.setEnabled(True)
+        self._skill_refresh_btn.setText("从网络刷新")
+        self._update_catalog_status_label()
+        self._filter_experts(self._expert_filter_cat)
+        self._filter_skills(self._skill_filter_cat)
+        if err:
+            QMessageBox.warning(self, "刷新失败", f"无法拉取远程目录：\n{err}")
+        else:
+            QMessageBox.information(self, "刷新完成", "已从网络拉取最新技能与专家目录。")
 
     def _populate_skill_grid(self, skills: list[dict]):
         while self._skill_grid.count():
@@ -755,10 +843,7 @@ class ExpertCenterPage(QFrame):
 
         for i, s in enumerate(skills):
             pkg_name = s["name"].strip().lower().replace(" ", "_")
-            installed = (
-                s["name"] in self._installed_skill_names
-                or pkg_name in self._installed_skill_names
-            )
+            installed = is_skill_installed(s, self._installed_skill_names)
             card = _SkillCard(s, installed=installed)
             card.install_requested.connect(self._on_skill_install)
             self._skill_cards[s["name"]] = card
@@ -766,36 +851,38 @@ class ExpertCenterPage(QFrame):
 
     def _filter_skills(self, category: str):
         self._skill_filter_cat = category
-        if category == "全部":
-            filtered = list(RECOMMENDED_SKILLS)
-        else:
-            filtered = [s for s in RECOMMENDED_SKILLS if s.get("category") == category]
+        filtered = catalog_skills_for_category(category)
 
         if self._search_text:
-            q = self._search_text
+            q = self._search_text.lower()
             filtered = [
                 s for s in filtered
-                if q in s["name"].lower() or q in s.get("desc", "").lower()
+                if q in s.get("name", "").lower()
+                or q in s.get("display", "").lower()
+                or q in s.get("desc", "").lower()
             ]
 
         self._populate_skill_grid(filtered)
 
     def _on_skill_install(self, skill_name: str):
-        from agent_runtime.skill_installer import install_market_skill
+        from agent_runtime.tool_executor import load_installed_handlers
 
-        skill_data = next((s for s in RECOMMENDED_SKILLS if s["name"] == skill_name), None)
+        skill_data = skill_by_name(skill_name)
         if not skill_data:
             QMessageBox.warning(self, "提示", f"未找到技能「{skill_name}」的信息。")
             return
+        if is_planned_skill(skill_data):
+            QMessageBox.information(
+                self, "规划中",
+                f"「{skill_data.get('display', skill_name)}」尚在规划中，暂不可安装。",
+            )
+            return
 
         try:
-            result = install_market_skill(
-                skill_name,
-                skill_data["name"],
-                skill_data.get("desc", ""),
-            )
-            self._installed_skill_names.add(skill_name)
+            result = install_from_catalog(skill_data)
+            load_installed_handlers()
             pkg = result.get("package_name", "")
+            self._installed_skill_names.add(skill_name)
             if pkg:
                 self._installed_skill_names.add(pkg)
 
@@ -805,7 +892,7 @@ class ExpertCenterPage(QFrame):
 
             QMessageBox.information(
                 self, "安装成功",
-                f"技能「{skill_name}」已安装到：\n{result.get('install_path', '')}",
+                install_success_message(skill_data, result.get("install_path", "")),
             )
         except Exception as e:
             QMessageBox.critical(self, "安装失败", str(e))

@@ -80,6 +80,16 @@ def bootstrap_seed_data() -> None:
                 "remark": "请配置本机可执行文件路径",
                 "enabled": 0,
             })
+    try:
+        from agent_runtime.mcp_client import ensure_default_mcp_config
+        ensure_default_mcp_config()
+    except Exception:
+        pass
+    try:
+        from core.remote_catalog import ensure_catalog_url_configured
+        ensure_catalog_url_configured()
+    except Exception:
+        pass
     if not query_all("SELECT id FROM workflows LIMIT 1"):
         examples = [
             ("投标文件响应", ["导入招标文件", "总结", "提取技术要求", "生成投标响应大纲"]),

@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "updated_at": "2026-06-28",
+  "skills": [
+    {
+      "name": "github_helper",
+      "display": "GitHub 助手",
+      "desc": "通过 MCP GitHub 查 Issue/PR、读仓库文件（需配置 GitHub MCP）",
+      "category": "开发",
+      "icon": "🐙",
+      "skill_type": "prompt",
+      "featured": true,
+      "recommended_mcp": ["github"],
+      "skill_md": "# GitHub 助手\n\n用户询问仓库、Issue、PR 时使用。\n\n## 步骤\n\n1. 确认 owner/repo\n2. 调用 `mcp__github__*` 工具\n3. 汇总结果\n"
+    }
+  ],
+  "experts": [
+    {
+      "name": "MCP 配置顾问",
+      "provider": "Buddy",
+      "category": "技术工程",
+      "desc": "帮助用户配置 MCP Server、排查连接问题",
+      "tags": ["MCP", "配置"],
+      "prompt": "你是 MCP 配置顾问。帮助用户启用 Filesystem/GitHub/Fetch 等 MCP，解释 Test & reload、Token、Node.js 依赖。回答要步骤清晰。"
+    }
+  ]
+}

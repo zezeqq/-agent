@@ -21,6 +21,7 @@ FILE_TOOLS = frozenset({
     "office_word_create", "office_excel_create", "office_ppt_create",
 })
 NETWORK_TOOLS = frozenset({"open_url", "skill_install", "image_analyze"})
+MCP_TOOL_PREFIX = "mcp__"
 EXEC_TOOLS = frozenset({"shell_run"})  # 仅 shell 受「命令执行」限制；software_launch 是启动本地应用
 APP_LAUNCH_TOOLS = frozenset({"software_launch", "find_application"})
 GUI_TOOLS = frozenset({
@@ -50,6 +51,11 @@ def plugins_disabled() -> bool:
 
 def is_tool_allowed(tool_name: str) -> str | None:
     """Return error message if blocked, else None."""
+    if tool_name.startswith(MCP_TOOL_PREFIX):
+        if not get_bool("enable_mcp", True):
+            return "错误：MCP 工具已在设置 → 安全中心关闭。"
+        if not get_bool("allow_network", True):
+            return "错误：MCP 需要网络访问权限，请在安全中心开启「网络访问」。"
     if tool_name in FILE_TOOLS and not get_bool("allow_file_access", True):
         return "错误：文件访问权限已在安全中心关闭。"
     if tool_name in NETWORK_TOOLS and not get_bool("allow_network", True):
@@ -157,7 +163,20 @@ def reload_skill_handlers() -> None:
     load_installed_handlers()
 
 
+def check_remote_catalog_on_startup() -> None:
+    """Fetch remote expert/skill catalog manifest if URL is configured."""
+    from core.remote_catalog import ensure_catalog_url_configured, fetch_remote_catalog
+
+    ensure_catalog_url_configured()
+    try:
+        fetch_remote_catalog()
+    except Exception as exc:
+        logger.warning("Remote catalog startup fetch failed: %s", exc)
+
+
 def check_skill_updates_on_startup() -> None:
+    """Re-install Skill packages that have a source_url (best-effort)."""
+    check_remote_catalog_on_startup()
     if not get_bool("skill_auto_update", True):
         return
     rows = query_all(
@@ -166,7 +185,23 @@ def check_skill_updates_on_startup() -> None:
     )
     if not rows:
         return
-    logger.info("Skill auto-update enabled, %d package(s) registered.", len(rows))
+    logger.info("Skill update check: %d package(s) with source_url.", len(rows))
+    from agent_runtime.skill_installer import install_skill_from_url
+    from agent_runtime.tool_executor import load_installed_handlers
+
+    for row in rows:
+        url = (row.get("source_url") or "").strip()
+        if not url:
+            continue
+        try:
+            install_skill_from_url(url)
+            logger.info("Skill updated from URL: %s", row.get("package_name"))
+        except Exception as exc:
+            logger.warning("Skill update failed for %s: %s", row.get("package_name"), exc)
+    try:
+        load_installed_handlers()
+    except Exception:
+        pass
 
 
 def apply_app_settings(app: QApplication, main_window: QMainWindow | None = None) -> None:

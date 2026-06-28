@@ -225,6 +225,21 @@ class SettingsDialog(QDialog):
         set_bool(key, value)
         self._notify(key)
 
+    def _on_mcp_enable_toggled(self, checked: bool) -> None:
+        self._save_bool("enable_mcp", checked)
+        import threading
+        from agent_runtime.mcp_client import refresh_mcp_tools, shutdown_mcp
+
+        def work():
+            if checked:
+                refresh_mcp_tools()
+            else:
+                shutdown_mcp()
+            self._refresh_mcp_tools_ui()
+
+        if hasattr(self, "_mcp_tools_layout"):
+            threading.Thread(target=work, daemon=True).start()
+
     def open_page(self, index: int) -> None:
         if 0 <= index < self._stack.count():
             self._nav.setCurrentRow(index)
@@ -414,6 +429,20 @@ class SettingsDialog(QDialog):
         auto_update.toggled.connect(lambda v: self._save_bool("skill_auto_update", v))
         layout.addWidget(_setting_row(
             t("settings.system.skill_update"), t("settings.system.skill_update_desc"), auto_update
+        ))
+
+        from core.remote_catalog import DEFAULT_REMOTE_CATALOG_URL
+
+        catalog_url = QLineEdit(get_setting("remote_catalog_url", "") or DEFAULT_REMOTE_CATALOG_URL)
+        catalog_url.setPlaceholderText(DEFAULT_REMOTE_CATALOG_URL)
+        catalog_url.setMinimumWidth(280)
+        catalog_url.editingFinished.connect(
+            lambda: self._save_setting("remote_catalog_url", catalog_url.text().strip())
+        )
+        layout.addWidget(_setting_row(
+            "远程目录 URL",
+            "专家中心「技能/专家」列表的 JSON 清单地址；启动时自动拉取并缓存 1 小时",
+            catalog_url,
         ))
 
         auto_install = _ToggleSwitch()
@@ -860,8 +889,112 @@ class SettingsDialog(QDialog):
         install_btn.clicked.connect(self._install_tool_from_url)
         layout.addWidget(install_btn)
 
+        layout.addSpacing(16)
+        layout.addWidget(_section_title("MCP 外部工具"))
+
+        mcp_desc = QLabel(
+            "9 mainstream MCP presets (Filesystem, GitHub, Fetch, …) pre-configured. "
+            "Enable in the dialog; add custom servers under the Custom tab."
+        )
+        mcp_desc.setStyleSheet("font-size: 12px; color: #9CA3AF;")
+        mcp_desc.setWordWrap(True)
+        layout.addWidget(mcp_desc)
+
+        self._mcp_status_label = QLabel("")
+        self._mcp_status_label.setObjectName("MutedLabel")
+        self._mcp_status_label.setWordWrap(True)
+        layout.addWidget(self._mcp_status_label)
+
+        mcp_btn_row = QHBoxLayout()
+        mcp_cfg = QPushButton("配置 MCP Servers…")
+        mcp_cfg.setProperty("variant", "primary")
+        mcp_cfg.setFixedWidth(180)
+        mcp_cfg.clicked.connect(self._open_mcp_dialog)
+        mcp_btn_row.addWidget(mcp_cfg)
+        mcp_reload = QPushButton("重新连接")
+        mcp_reload.setProperty("variant", "secondary")
+        mcp_reload.clicked.connect(self._reload_mcp)
+        mcp_btn_row.addWidget(mcp_reload)
+        mcp_btn_row.addStretch()
+        layout.addLayout(mcp_btn_row)
+
+        self._mcp_tools_widget = QWidget()
+        self._mcp_tools_layout = QVBoxLayout(self._mcp_tools_widget)
+        self._mcp_tools_layout.setContentsMargins(0, 0, 0, 0)
+        self._mcp_tools_layout.setSpacing(4)
+        layout.addWidget(self._mcp_tools_widget)
+        self._refresh_mcp_tools_ui()
+
         layout.addStretch()
         return scroll
+
+    def _open_mcp_dialog(self) -> None:
+        from ui.dialogs.mcp_dialog import MCPDialog
+        if MCPDialog(self).exec() == QDialog.Accepted:
+            self._refresh_mcp_tools_ui()
+            self._notify("mcp_config")
+
+    def _reload_mcp(self) -> None:
+        import threading
+        from agent_runtime.mcp_client import refresh_mcp_tools
+
+        def work():
+            refresh_mcp_tools()
+            self._refresh_mcp_tools_ui()
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _refresh_mcp_tools_ui(self) -> None:
+        from agent_runtime.mcp_client import mcp_manager, mcp_enabled
+
+        layout = self._mcp_tools_layout
+        while layout.count():
+            child = layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+
+        self._mcp_status_label.setText("\n".join(mcp_manager.get_status_lines()))
+
+        if not mcp_enabled():
+            empty = QLabel("MCP 已在安全中心关闭。")
+            empty.setStyleSheet("font-size:12px; color:#6b7280; padding:8px;")
+            layout.addWidget(empty)
+            return
+
+        tools = mcp_manager.get_cached_tool_definitions()
+        if not tools:
+            empty = QLabel("暂无 MCP 工具。点击「配置 MCP Servers」添加并测试连接。")
+            empty.setStyleSheet("font-size:12px; color:#6b7280; padding:8px;")
+            layout.addWidget(empty)
+            return
+
+        import json as _json
+        disabled_raw = get_setting("disabled_tools", "[]")
+        try:
+            disabled_set = set(_json.loads(disabled_raw))
+        except Exception:
+            disabled_set = set()
+
+        for tool_def in tools[:40]:
+            func = tool_def.get("function", {})
+            name = func.get("name", "")
+            tool_desc = func.get("description", "")[:80]
+            row = QWidget()
+            row.setFixedHeight(44)
+            row.setObjectName("SettingsListCard")
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(12, 4, 12, 4)
+            name_lbl = QLabel(name)
+            name_lbl.setStyleSheet("font-size:12px; font-weight:bold; color:#F0F2F5;")
+            rl.addWidget(name_lbl, 1)
+            desc_lbl = QLabel(tool_desc)
+            desc_lbl.setStyleSheet("font-size:11px; color:#9CA3AF;")
+            rl.addWidget(desc_lbl, 2)
+            toggle = _ToggleSwitch()
+            toggle.setChecked(name not in disabled_set)
+            toggle.toggled.connect(lambda checked, n=name: self._on_tool_toggled(n, checked))
+            rl.addWidget(toggle)
+            layout.addWidget(row)
 
     def _on_tool_toggled(self, name: str, checked: bool) -> None:
         import json as _json
@@ -1208,6 +1341,13 @@ class SettingsDialog(QDialog):
         confirm_danger.toggled.connect(lambda v: self._save_bool("confirm_dangerous_ops", v))
         layout.addWidget(_setting_row(
             "高风险操作确认", "执行高风险操作前要求用户确认", confirm_danger
+        ))
+
+        mcp_enable = _ToggleSwitch()
+        mcp_enable.setChecked(get_bool("enable_mcp", True))
+        mcp_enable.toggled.connect(self._on_mcp_enable_toggled)
+        layout.addWidget(_setting_row(
+            "MCP 外部工具", "允许 Agent 调用已配置的 MCP Server 工具", mcp_enable
         ))
 
         layout.addStretch()
